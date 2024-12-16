@@ -1,23 +1,19 @@
 import os
-import re
 import sys
 import uuid
 
 import redis
 
 from cryptography.fernet import Fernet
-from flask import abort, Flask, render_template, request
+from flask import abort, Flask, render_template, request, jsonify
 from redis.exceptions import ConnectionError
 from werkzeug.urls import url_quote_plus
 from werkzeug.urls import url_unquote_plus
+from distutils.util import strtobool
 
-
-SNEAKY_USER_AGENTS = ('Slackbot', 'facebookexternalhit', 'Twitterbot',
-                      'Facebot', 'WhatsApp', 'SkypeUriPreview',
-                      'Iframely', 'Google')
-SNEAKY_USER_AGENTS_RE = re.compile('|'.join(SNEAKY_USER_AGENTS))
-NO_SSL = os.environ.get('NO_SSL', False)
+NO_SSL = bool(strtobool(os.environ.get('NO_SSL', 'False')))
 URL_PREFIX = os.environ.get('URL_PREFIX', None)
+HOST_OVERRIDE = os.environ.get('HOST_OVERRIDE', None)
 TOKEN_SEPARATOR = '~'
 
 
@@ -43,7 +39,7 @@ else:
         host=redis_host, port=redis_port, db=redis_db)
 REDIS_PREFIX = os.environ.get('REDIS_PREFIX', 'snappass')
 
-TIME_CONVERSION = {'week': 604800, 'day': 86400, 'hour': 3600}
+TIME_CONVERSION = {'two weeks': 1209600, 'week': 604800, 'day': 86400, 'hour': 3600}
 
 
 def check_redis_alive(fn):
@@ -134,6 +130,7 @@ def password_exists(token):
     storage_key, decryption_key = parse_token(token)
     return redis_client.exists(storage_key)
 
+
 def empty(value):
     if not value:
         return True
@@ -169,10 +166,6 @@ def request_is_valid(request):
 def index():
     return render_template('set_password.html')
 
-"""Add in ability to render a clean error page"""
-@app.errorhandler(404)
-def page_not_found(e):
-    return render_template('404.html'), 404
 
 @app.route('/', methods=['POST'])
 def handle_password():
@@ -180,22 +173,30 @@ def handle_password():
     token = set_password(password, ttl)
 
     if NO_SSL:
-        base_url = request.url_root
+        if HOST_OVERRIDE:
+            base_url = f'http://{HOST_OVERRIDE}/'
+        else:
+            base_url = request.url_root
     else:
-        base_url = request.url_root.replace("http://", "https://")
+        if HOST_OVERRIDE:
+            base_url = f'https://{HOST_OVERRIDE}/'
+        else:
+            base_url = request.url_root.replace("http://", "https://")
     if URL_PREFIX:
         base_url = base_url + URL_PREFIX.strip("/") + "/"
     link = base_url + url_quote_plus(token)
-    return render_template('confirm.html', password_link=link)
+    if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+        return jsonify(link=link, ttl=ttl)
+    else:
+        return render_template('confirm.html', password_link=link)
 
 
 @app.route('/<password_key>', methods=['GET'])
 def preview_password(password_key):
     password_key = url_unquote_plus(password_key)
     if not password_exists(password_key):
-        abort(404)
-    if not request_is_valid(request):
-        abort(404)
+        return render_template('expired.html'), 404
+
     return render_template('preview.html')
 
 
@@ -204,7 +205,7 @@ def show_password(password_key):
     password_key = url_unquote_plus(password_key)
     password = get_password(password_key)
     if not password:
-        abort(404)
+        return render_template('expired.html'), 404
 
     return render_template('password.html', password=password)
 
